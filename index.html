@@ -1814,19 +1814,27 @@ async function attemptLogin(){
   const p = document.getElementById('loginPassword').value;
   const errBox = document.getElementById('loginError');
   const syncNote = document.getElementById('loginSyncNote');
+  errBox.style.display = 'none';
   syncNote.style.display = 'none';
 
+  let users = seedDefaultUsersIfNeeded();
+  let match = users.find(x => u && p && x.username === u && x.password === p);
+
   const syncUrl = loadSettings().sheetSyncUrl;
-  if (syncUrl && u && p){
-    const ok = await syncPull(true);
-    if (!ok){
-      syncNote.textContent = '⚠ Could not reach the shared login server just now — trying with accounts already saved on this device/browser. If this device is new or in Private/Incognito mode, that may be why a newly-added account isn\'t found yet.';
+  if (!match && syncUrl && u && p){
+    syncNote.textContent = '🔄 Not found on this device yet — checking for a newly-added account…';
+    syncNote.style.display = 'block';
+    const ok = await syncPull(true, 6000);
+    if (ok){
+      syncNote.style.display = 'none';
+      users = seedDefaultUsersIfNeeded();
+      match = users.find(x => u && p && x.username === u && x.password === p);
+    } else {
+      syncNote.textContent = '⚠ Could not reach the shared login server (it may just be slow to respond — try again in a moment). Checked accounts already saved on this device/browser only.';
       syncNote.style.display = 'block';
     }
   }
 
-  const users = seedDefaultUsersIfNeeded();
-  const match = users.find(x => u && p && x.username === u && x.password === p);
   const role = match ? match.role : null;
 
   if (!role){
@@ -4805,9 +4813,17 @@ function stopBackgroundSync(){
   if (backgroundSyncTimer){ clearInterval(backgroundSyncTimer); backgroundSyncTimer = null; }
 }
 
-async function syncPush(silent){
+function fetchWithTimeout(url, options, timeoutMs){
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, Object.assign({}, options, { signal: controller.signal }))
+    .finally(() => clearTimeout(timer));
+}
+
+async function syncPush(silent, timeoutMs){
+  timeoutMs = timeoutMs || 15000;
   const url = loadSettings().sheetSyncUrl;
-  if (!url) { if (!silent) alert('No Google Sheet URL is configured in Settings yet.'); return; }
+  if (!url) { if (!silent) alert('No Google Sheet URL is configured in Settings yet.'); return false; }
   setSyncStatus('busy', '🔄 Syncing…');
   try{
     const db = loadRegistry();
@@ -4822,25 +4838,28 @@ async function syncPush(silent){
         savedAt: new Date().toISOString()
       }
     };
-    const res = await fetch(url, {
+    const res = await fetchWithTimeout(url, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify(payload)
-    });
+    }, timeoutMs);
     if (!res.ok) throw new Error('Bad response');
     setSyncStatus('ok', '✔ Synced ' + new Date().toLocaleTimeString());
     if (!silent) alert('✔ Data pushed to the Google Sheet successfully.');
+    return true;
   }catch(err){
     setSyncStatus('error', '⚠ Sync failed — working offline');
     if (!silent) alert('Could not reach the Google Sheet. Check the URL in Settings and your internet connection.\n\nYour data is still safely saved in this browser.');
+    return false;
   }
 }
-async function syncPull(silent){
+async function syncPull(silent, timeoutMs){
+  timeoutMs = timeoutMs || 15000;
   const url = loadSettings().sheetSyncUrl;
   if (!url) { if (!silent) alert('No Google Sheet URL is configured in Settings yet.'); return false; }
   setSyncStatus('busy', '🔄 Pulling…');
   try{
-    const res = await fetch(url + '?action=pull');
+    const res = await fetchWithTimeout(url + '?action=pull', {}, timeoutMs);
     if (!res.ok) throw new Error('Bad response');
     const json = await res.json();
     if (json && json.data){
